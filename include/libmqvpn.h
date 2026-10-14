@@ -683,7 +683,7 @@ MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v)
 MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
 /* Underlay path MTU the outer QUIC packets are sized for: 0 = default
  * (1400-byte packets, TUN MTU ~1382), 1280..9000 = largest IP packet the
- * path carries. Packets are capped at xquic's limit (TUN MTU 1402). */
+ * path carries. Packets are capped at xquic's limit (TUN MTU 1418). */
 MQVPN_API int mqvpn_config_set_path_mtu(mqvpn_config_t *cfg, int mtu);
 
 /* ─── Flow-aware reorder shim config (§16.1) ───
