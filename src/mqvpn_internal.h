@@ -383,6 +383,8 @@ MQVPN_INTERNAL int mqvpn_client_test_transport_send(mqvpn_client_t *c,
                                                     const mqvpn_datagram_t *bufs,
                                                     unsigned n);
 MQVPN_INTERNAL int mqvpn_client_test_kill_conn(mqvpn_client_t *c);
+MQVPN_INTERNAL int mqvpn_client_test_drop_dgram_fq(mqvpn_client_t *c);
+MQVPN_INTERNAL int64_t mqvpn_client_test_dgram_fq_dropped(const mqvpn_client_t *c);
 MQVPN_INTERNAL uint64_t
 mqvpn_client_test_get_reconnect_scheduled_us(const mqvpn_client_t *c);
 

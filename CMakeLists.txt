@@ -245,6 +245,7 @@ set(MQVPN_LIB_SOURCES
     src/path_state_machine.c
     src/flow_sched.c
     src/redundant_tx.c
+    src/dgram_fq.c
     src/addr_pool.c
     src/auth.c
     src/log.c
@@ -961,6 +962,7 @@ if(BUILD_TESTING)
     add_executable(test_route_check tests/test_route_check.c src/platform/linux/route_check.c src/log.c)
     add_executable(test_flow_sched tests/test_flow_sched.c src/flow_sched.c src/log.c)
     add_executable(test_redundant_tx tests/test_redundant_tx.c src/redundant_tx.c)
+    add_executable(test_dgram_fq tests/test_dgram_fq.c src/dgram_fq.c)
     add_executable(test_status tests/test_status.c third_party/yyjson/yyjson.c)
     add_executable(test_path_state_machine
         tests/test_path_state_machine.c
@@ -1005,7 +1007,7 @@ if(BUILD_TESTING)
     # Sizes of the structs the getters fill in, per soname (compile-time only).
     add_executable(test_abi_sizes tests/test_abi_sizes.c)
     target_compile_definitions(test_abi_sizes PRIVATE MQVPN_SOVERSION=${MQVPN_SOVERSION})
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_cli_connect test_qr_term test_classifier test_icmp test_reorder_gate test_path_readd test_path_line test_clock_source test_abi_sizes)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_dgram_fq test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_cli_connect test_qr_term test_classifier test_icmp test_reorder_gate test_path_readd test_path_line test_clock_source test_abi_sizes)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of

@@ -2494,6 +2494,9 @@ TEST(client_reconnect_clears_backpressure)
     loopback_pump_until(&lb, done_established, 10000);
     ASSERT_EQ(g_cli_tunnel_ready_called, 1);
     mqvpn_client_set_tun_active(lb.cli, 1, -1);
+    /* Without the datagram queue, which takes what xquic refuses (tested in
+     * client_reconnect_drops_dgram_queue). */
+    ASSERT_EQ(mqvpn_client_test_drop_dgram_fq(lb.cli), 0);
 
     /* No pump: nothing leaves xquic's send queue, so it fills. */
     uint8_t pkt[1000];
@@ -2521,6 +2524,49 @@ TEST(client_reconnect_clears_backpressure)
 
     ASSERT_EQ(mqvpn_client_get_interest(lb.cli, &in), MQVPN_OK);
     ASSERT_EQ(in.tun_readable, 1);
+    uplink_pkt(pkt);
+    g_tun_output_want = g_tun_output_called + 1;
+    ASSERT_EQ(mqvpn_client_on_tun_packet(lb.cli, pkt, sizeof(pkt)), MQVPN_OK);
+    loopback_pump_until(&lb, done_server_tun_output, 5000);
+    ASSERT_EQ(g_tun_output_called, g_tun_output_want);
+
+    loopback_teardown(&lb);
+}
+
+/* With the datagram queue the client keeps reading the TUN when xquic's send
+ * queue is full: the queue takes the packets and drops from the largest flow
+ * once full. A connection that dies then must not hand its queued packets to
+ * the next one: the new connection starts with an empty queue and its uplink
+ * works. */
+TEST(client_reconnect_drops_dgram_queue)
+{
+    loopback_t lb;
+    loopback_setup(&lb, tweak_reconnect_hourly);
+    loopback_pump_until(&lb, done_established, 10000);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    mqvpn_client_set_tun_active(lb.cli, 1, -1);
+
+    /* No pump: xquic's send queue fills, then the datagram queue. */
+    uint8_t pkt[1000];
+    uplink_pkt(pkt);
+    for (int k = 0; k < 2000; k++)
+        ASSERT_EQ(mqvpn_client_on_tun_packet(lb.cli, pkt, sizeof(pkt)), MQVPN_OK);
+    ASSERT_EQ(mqvpn_client_test_dgram_fq_dropped(lb.cli) > 0, 1);
+    mqvpn_interest_t in;
+    ASSERT_EQ(mqvpn_client_get_interest(lb.cli, &in), MQVPN_OK);
+    ASSERT_EQ(in.tun_readable, 1);
+
+    ASSERT_EQ(mqvpn_client_test_kill_conn(lb.cli), 0);
+    loopback_pump_until(&lb, done_client_reconnecting, 5000);
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_RECONNECTING);
+    mqvpn_client_set_tun_active(lb.cli, 0, -1);
+
+    ASSERT_EQ(mqvpn_client_connect(lb.cli), MQVPN_OK);
+    loopback_pump_until(&lb, done_second_tunnel, 10000);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 2);
+    mqvpn_client_set_tun_active(lb.cli, 1, -1);
+    ASSERT_EQ(mqvpn_client_test_dgram_fq_dropped(lb.cli), 0);
+
     uplink_pkt(pkt);
     g_tun_output_want = g_tun_output_called + 1;
     ASSERT_EQ(mqvpn_client_on_tun_packet(lb.cli, pkt, sizeof(pkt)), MQVPN_OK);
@@ -3255,6 +3301,7 @@ main(void)
     run_server_reconnect_manual_failure_rearm();
     run_client_conn_lost_in_tunnel_ready_reconnects();
     run_client_reconnect_clears_backpressure();
+    run_client_reconnect_drops_dgram_queue();
 
     run_server_status_lists_live_paths_after_path_churn();
 

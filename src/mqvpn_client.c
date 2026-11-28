@@ -56,6 +56,7 @@
 #include "reorder_rx.h"
 #include "reorder_tx.h"
 #include "redundant_tx.h"
+#include "dgram_fq.h"
 
 /* ─── Constants ─── */
 
@@ -155,6 +156,10 @@ struct cli_conn_s {
      * cfg.redundant is set, freed on conn teardown. */
     mqvpn_redundant_tx_t *redundant_tx;
     uint64_t redundant_refresh_us; /* last 100 ms metrics/slot refresh */
+    /* Datagrams xquic could not take yet, one FIFO per flow (dgram_fq.h);
+     * NULL falls back to dropping and pausing the TUN. */
+    mqvpn_dgram_fq_t *dgram_fq;
+    uint64_t dgram_fq_dropped_logged;
     int redundant_full_warned; /* "tracking table full" logged, until select recovers */
     /* Test seam: NULL in production (the real xquic sends). */
     mqvpn_test_send_fn test_send;
@@ -913,6 +918,29 @@ mqvpn_client_test_kill_conn(mqvpn_client_t *c)
     xqc_conn_close(c->engine, &c->conn->cid);
     xqc_engine_main_logic(c->engine);
     return 0;
+}
+
+/* Test-only: the current connection's datagram queue. _drop_dgram_fq frees
+ * it, so a test can reach the backpressure stop that a full xquic send queue
+ * takes without one; the next connection gets a new queue. _dgram_fq_dropped
+ * returns the packets the queue dropped, -1 without a queue. Hidden from
+ * libmqvpn.so's dynamic export table (not part of the public ABI). */
+MQVPN_INTERNAL
+int
+mqvpn_client_test_drop_dgram_fq(mqvpn_client_t *c)
+{
+    if (!c || !c->conn) return -1;
+    mqvpn_dgram_fq_free(c->conn->dgram_fq);
+    c->conn->dgram_fq = NULL;
+    return 0;
+}
+
+MQVPN_INTERNAL
+int64_t
+mqvpn_client_test_dgram_fq_dropped(const mqvpn_client_t *c)
+{
+    if (!c || !c->conn || !c->conn->dgram_fq) return -1;
+    return (int64_t)mqvpn_dgram_fq_dropped(c->conn->dgram_fq);
 }
 
 /* Test-only: read the armed reconnect deadline (0 = disarmed). Lets tests
@@ -2544,6 +2572,8 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
     }
 }
 
+static void cli_fq_drain(mqvpn_client_t *c, cli_conn_t *conn);
+
 static void
 cb_dgram_write(xqc_h3_conn_t *h3_conn, void *user_data)
 {
@@ -2552,6 +2582,7 @@ cb_dgram_write(xqc_h3_conn_t *h3_conn, void *user_data)
     if (!conn) return;
     mqvpn_client_t *c = conn->client;
 
+    cli_fq_drain(c, conn);
     if (conn->backpressure) {
         conn->backpressure = 0;
         if (c->cbs.ready_for_tun) c->cbs.ready_for_tun(c->user_ctx);
@@ -3040,6 +3071,8 @@ cli_conn_destroy(mqvpn_client_t *c)
     }
     mqvpn_redundant_tx_free(conn->redundant_tx);
     conn->redundant_tx = NULL;
+    mqvpn_dgram_fq_free(conn->dgram_fq);
+    conn->dgram_fq = NULL;
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* Teardown contract: tcp_lane BEFORE lwip_ctx — flow teardown will
@@ -3208,6 +3241,10 @@ cli_start_connection(mqvpn_client_t *c)
     }
 
     c->conn = conn; /* ownership transfer — cleanup won't free */
+
+    conn->dgram_fq = mqvpn_dgram_fq_new(MQVPN_DGRAM_FQ_MAX_BYTES, MQVPN_DGRAM_FQ_QUANTUM);
+    if (!conn->dgram_fq)
+        LOG_W(c, "datagram queue alloc failed; dropping datagrams xquic cannot take");
 
     if (c->config.redundant) {
         conn->redundant_tx = mqvpn_redundant_tx_new();
@@ -4205,6 +4242,30 @@ tun_xqc_send(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *buf, size_t n,
                                     mqvpn_dgram_qos_level(c->config.scheduler));
 }
 
+static int
+cli_fq_send(void *ctx, uint32_t flow_hash, const uint8_t *frame, size_t len)
+{
+    cli_conn_t *conn = ctx;
+    mqvpn_client_t *c = conn->client;
+    uint64_t dgram_id;
+    xqc_int_t xret = tun_xqc_send(c, conn, frame, len, &dgram_id, flow_hash, UINT64_MAX);
+    if (xret == -XQC_EAGAIN) return MQVPN_DGRAM_FQ_AGAIN;
+    if (xret < 0) {
+        LOG_D(c, "queued datagram send failed: xret=%d", xret);
+        return -1;
+    }
+    c->dgram_sent++;
+    return 0;
+}
+
+static void
+cli_fq_drain(mqvpn_client_t *c, cli_conn_t *conn)
+{
+    (void)c;
+    if (!conn->dgram_fq || mqvpn_dgram_fq_empty(conn->dgram_fq)) return;
+    mqvpn_dgram_fq_drain(conn->dgram_fq, cli_fq_send, conn);
+}
+
 /* Usable slots for a redundant copy; also keeps the tracker's slot bindings in
  * step (the FSM owns liveness, so this is the one place it is read). Returns
  * the count written to out[]. */
@@ -4311,7 +4372,33 @@ tun_send_datagram(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_
     uint64_t dgram_id;
     uint32_t fh =
         flow_hash_pkt(pkt, (int)len, c->config.scheduler == MQVPN_SCHED_WLB_UDP_PIN);
-    xret = tun_xqc_send(c, conn, frame_buf, frame_written, &dgram_id, fh, UINT64_MAX);
+    if (conn->dgram_fq && !mqvpn_dgram_fq_empty(conn->dgram_fq)) {
+        xret = -XQC_EAGAIN; /* wait behind the packets already queued */
+    } else {
+        xret = tun_xqc_send(c, conn, frame_buf, frame_written, &dgram_id, fh, UINT64_MAX);
+    }
+    if (xret == -XQC_EAGAIN && conn->dgram_fq) {
+        /* Queue it in its flow's FIFO instead of dropping it and pausing the
+         * TUN, so a flow sending more than the paths carry only loses its
+         * own packets. The key hashes every UDP flow apart, whatever the
+         * scheduler (fh leaves UDP unpinned outside wlb_udp_pin). Its
+         * reorder sequence is taken now: a queued packet keeps its place in
+         * its flow, and one dropped later is a loss to the receiver. */
+        uint32_t key = flow_hash_pkt(pkt, (int)len, true);
+        mqvpn_dgram_fq_enqueue(conn->dgram_fq, key, fh, frame_buf, frame_written);
+        if (frame_buf != stack_buf) free(frame_buf);
+        if (do_stamp) mqvpn_reorder_tx_commit(conn->reorder_tx, peek, client_now_us(c));
+        uint64_t dropped = mqvpn_dgram_fq_dropped(conn->dgram_fq);
+        if (dropped >= conn->dgram_fq_dropped_logged + 1024 ||
+            (dropped && !conn->dgram_fq_dropped_logged)) {
+            LOG_I(c,
+                  "datagram queue full, dropped from the largest flow: dropped=%" PRIu64,
+                  dropped);
+            conn->dgram_fq_dropped_logged = dropped;
+        }
+        cli_fq_drain(c, conn);
+        return MQVPN_OK;
+    }
     if (frame_buf != stack_buf) free(frame_buf);
 
     if (xret == -XQC_EAGAIN) {
@@ -4636,6 +4723,9 @@ mqvpn_client_tick(mqvpn_client_t *c)
     ASSERT_TICK_THREAD(c);
 
     tick_handshake_watchdog(c);
+    /* normally drained from dgram_write_notify; this only keeps a queue that
+     * missed one from waiting forever */
+    if (c->conn) cli_fq_drain(c, c->conn);
     if (c->engine) xqc_engine_main_logic(c->engine);
     tick_path_recovery(c);
     tick_reconnect(c);

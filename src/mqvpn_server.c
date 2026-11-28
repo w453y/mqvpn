@@ -45,6 +45,7 @@
 #include "auth.h"
 #include "dgram_frame.h"
 #include "flow_sched.h"
+#include "dgram_fq.h"
 #include "icmp.h"
 #include "reorder.h"
 #include "reorder_gate.h"
@@ -84,6 +85,10 @@ struct svr_conn_s {
     uint64_t dgram_lost_cnt;
     uint64_t dgram_acked_cnt;
     uint64_t dgram_dropped_cnt; /* refused by xquic (-XQC_EAGAIN) */
+    /* Datagrams xquic could not take yet, one FIFO per flow (dgram_fq.h);
+     * created on the first refusal, freed with the session. */
+    mqvpn_dgram_fq_t *dgram_fq;
+    uint64_t dgram_fq_dropped_logged;
 
     /* Auth identity (set on CONNECT-IP auth success) */
     char username[64];
@@ -751,6 +756,8 @@ static void
 svr_conn_free(svr_conn_t *conn)
 {
     if (!conn) return;
+    mqvpn_dgram_fq_free(conn->dgram_fq);
+    conn->dgram_fq = NULL;
     if (conn->reorder_tx) {
         mqvpn_reorder_tx_free(conn->reorder_tx);
         conn->reorder_tx = NULL;
@@ -837,6 +844,9 @@ svr_session_release(mqvpn_server_t *s, svr_conn_t *conn)
     conn->masque_stream_id = 0;
     conn->tunnel_established = 0;
     conn->peer_reorder_supported = 0;
+    /* packets queued for this tunnel must not reach a later one */
+    mqvpn_dgram_fq_free(conn->dgram_fq);
+    conn->dgram_fq = NULL;
 
     /* Tunnel-generation fence for the reorder shim: free the engines with the
      * session so packets buffered under the old tunnel (possibly a re-assigned
@@ -2126,6 +2136,39 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
     }
 }
 
+static int
+svr_fq_send(void *ctx, uint32_t flow_hash, const uint8_t *frame, size_t len)
+{
+    svr_conn_t *conn = ctx;
+    uint64_t dgram_id;
+    xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(conn->h3_conn), flow_hash);
+    xqc_int_t xret =
+        xqc_h3_ext_datagram_send(conn->h3_conn, (void *)frame, len, &dgram_id,
+                                 mqvpn_dgram_qos_level(conn->eff_sched));
+    if (xret == -XQC_EAGAIN) return MQVPN_DGRAM_FQ_AGAIN;
+    if (xret < 0) {
+        LOG_D(conn->server, "queued datagram send failed: xret=%d", xret);
+        return -1;
+    }
+    conn->server->dgram_sent++;
+    return 0;
+}
+
+static void
+svr_fq_drain(svr_conn_t *conn)
+{
+    if (!conn->dgram_fq || mqvpn_dgram_fq_empty(conn->dgram_fq)) return;
+    mqvpn_dgram_fq_drain(conn->dgram_fq, svr_fq_send, conn);
+}
+
+static void
+cb_dgram_write(xqc_h3_conn_t *h3_conn, void *user_data)
+{
+    (void)h3_conn;
+    svr_conn_t *conn = (svr_conn_t *)user_data;
+    if (conn) svr_fq_drain(conn);
+}
+
 static void
 cb_dgram_acked(xqc_h3_conn_t *h, uint64_t id, void *ud)
 {
@@ -2408,6 +2451,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .h3_ext_dgram_cbs =
             {
                 .dgram_read_notify = cb_dgram_read,
+                .dgram_write_notify = cb_dgram_write,
                 .dgram_acked_notify = cb_dgram_acked,
                 .dgram_lost_notify = cb_dgram_lost,
                 .dgram_mss_updated_notify = cb_dgram_mss_updated,
@@ -2809,16 +2853,43 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     uint64_t dgram_id;
     uint32_t fh =
         flow_hash_pkt(pkt, (int)len, target->eff_sched == MQVPN_SCHED_WLB_UDP_PIN);
-    xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(target->h3_conn), fh);
-    xret = xqc_h3_ext_datagram_send(target->h3_conn, frame_buf, frame_written, &dgram_id,
-                                    mqvpn_dgram_qos_level(target->eff_sched));
+    if (target->dgram_fq && !mqvpn_dgram_fq_empty(target->dgram_fq)) {
+        xret = -XQC_EAGAIN; /* wait behind the packets already queued */
+    } else {
+        xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(target->h3_conn), fh);
+        xret =
+            xqc_h3_ext_datagram_send(target->h3_conn, frame_buf, frame_written, &dgram_id,
+                                     mqvpn_dgram_qos_level(target->eff_sched));
+    }
+
+    if (xret == -XQC_EAGAIN && !target->dgram_fq)
+        target->dgram_fq =
+            mqvpn_dgram_fq_new(MQVPN_DGRAM_FQ_MAX_BYTES, MQVPN_DGRAM_FQ_QUANTUM);
+    if (xret == -XQC_EAGAIN && target->dgram_fq) {
+        /* Queue it in its flow's FIFO, so a flow sending more than this
+         * client's paths carry only loses its own packets (see the client's
+         * tun_send_datagram, the same policy). */
+        uint32_t key = flow_hash_pkt(pkt, (int)len, true);
+        mqvpn_dgram_fq_enqueue(target->dgram_fq, key, fh, frame_buf, frame_written);
+        if (frame_buf != stack_buf) free(frame_buf);
+        if (do_stamp) mqvpn_reorder_tx_commit(target->reorder_tx, &peek, now_us());
+        uint64_t dropped = mqvpn_dgram_fq_dropped(target->dgram_fq);
+        if (dropped >= target->dgram_fq_dropped_logged + 1024 ||
+            (dropped && !target->dgram_fq_dropped_logged)) {
+            LOG_I(s,
+                  "datagram queue full, dropped from the largest flow: dropped=%" PRIu64,
+                  dropped);
+            target->dgram_fq_dropped_logged = dropped;
+        }
+        svr_fq_drain(target);
+        return MQVPN_OK;
+    }
     if (frame_buf != stack_buf) free(frame_buf);
 
     if (xret == -XQC_EAGAIN) {
-        /* xquic cannot take this client's datagram now (its send queue is
-         * full, or 1-RTT is not ready yet): drop it, as the client does. The
-         * TUN is shared by every client, so pausing it here would stall all
-         * of them until this one could send again. */
+        /* No queue (allocation failed): drop it, as the client does. The TUN
+         * is shared by every client, so pausing it here would stall all of
+         * them until this one could send again. */
         target->dgram_dropped_cnt++;
         s->tun_drop_cnt++;
         if ((target->dgram_dropped_cnt % 1024) == 1) {
@@ -2847,6 +2918,13 @@ mqvpn_server_tick(mqvpn_server_t *s)
     if (!s) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(s);
 
+    /* datagram queues are normally drained from dgram_write_notify; this
+     * only keeps one that missed it from waiting forever */
+    if (s->n_sessions > 0) {
+        for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+            if (s->sessions[i]) svr_fq_drain(s->sessions[i]);
+        }
+    }
     if (s->engine) xqc_engine_main_logic(s->engine);
 
     /* §5/§11.1: drive reorder RX gap timeouts + idle eviction for every active

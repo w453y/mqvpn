@@ -209,8 +209,11 @@ if [ "$FAIL" -ne 0 ]; then
 fi
 # And the server must have dropped client 1's excess (client 2 only pings,
 # so the drops can only be client 1's), or the flood never reached the
-# point this test is about.
-if ! grep -q "datagram dropped on EAGAIN" "${WORK_DIR}/server.log"; then
+# point this test is about. The drop is logged where it happens: at the
+# per-flow datagram queue (dgram_fq) when it is full, or when xquic refuses
+# a datagram with -XQC_EAGAIN.
+if ! grep -qE "datagram dropped on EAGAIN|datagram queue full, dropped from the largest flow" \
+    "${WORK_DIR}/server.log"; then
     echo "=== FAIL: the server never had to drop client 1's excess ==="
     tail -20 "${WORK_DIR}/server.log"
     exit 1
