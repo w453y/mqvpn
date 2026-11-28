@@ -90,7 +90,7 @@ test_all_fields_forwarded(void)
         fprintf(stderr, "FAIL: mqvpn_config_new\n");
         return;
     }
-    mqvpn_platform_apply_client_config(lc, &cfg);
+    ASSERT_EQ_INT(mqvpn_platform_apply_client_config(lc, &cfg), MQVPN_OK, "bridge rc");
 
     ASSERT_EQ_STR(lc->server_host, "203.0.113.7", "server_host");
     ASSERT_EQ_INT(lc->server_port, 4433, "server_port");
@@ -153,7 +153,7 @@ test_defaults_and_fallbacks(void)
         return;
     }
     uint64_t rrl_default = lc->recv_rate_limit;
-    mqvpn_platform_apply_client_config(lc, &cfg);
+    ASSERT_EQ_INT(mqvpn_platform_apply_client_config(lc, &cfg), MQVPN_OK, "bridge rc");
 
     ASSERT_EQ_INT(lc->multipath, 0, "multipath (n_paths=1)");
     ASSERT_EQ_INT(lc->scheduler, MQVPN_SCHED_WLB, "unknown scheduler keeps the default");
@@ -164,15 +164,45 @@ test_defaults_and_fallbacks(void)
 
     /* remaining scheduler codepoints */
     cfg.scheduler = 1;
-    mqvpn_platform_apply_client_config(lc, &cfg);
+    ASSERT_EQ_INT(mqvpn_platform_apply_client_config(lc, &cfg), MQVPN_OK, "bridge rc");
     ASSERT_EQ_INT(lc->scheduler, MQVPN_SCHED_WLB, "scheduler map 1");
     cfg.scheduler = 3;
-    mqvpn_platform_apply_client_config(lc, &cfg);
+    ASSERT_EQ_INT(mqvpn_platform_apply_client_config(lc, &cfg), MQVPN_OK, "bridge rc");
     ASSERT_EQ_INT(lc->scheduler, MQVPN_SCHED_WLB_UDP_PIN, "scheduler map 3");
     cfg.scheduler = 0;
-    mqvpn_platform_apply_client_config(lc, &cfg);
+    ASSERT_EQ_INT(mqvpn_platform_apply_client_config(lc, &cfg), MQVPN_OK, "bridge rc");
     ASSERT_EQ_INT(lc->scheduler, MQVPN_SCHED_MINRTT, "scheduler map 0");
 
+    mqvpn_config_free(lc);
+}
+
+static void
+test_pin(void)
+{
+    static const char good[] = "I7FvtHlDziB1xdZGyn_LS3mEDKTQoCGvgGp4_4HRzvM";
+    mqvpn_client_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.server_addr = "203.0.113.7";
+    cfg.server_port = 4433;
+    cfg.scheduler = 1;
+    mqvpn_config_t *lc = mqvpn_config_new();
+    if (!lc) {
+        g_fail++;
+        return;
+    }
+    ASSERT_EQ_INT(mqvpn_platform_apply_client_config(lc, &cfg), MQVPN_OK, "pin NULL rc");
+    ASSERT_EQ_INT(lc->has_server_pin, 0, "pin NULL: unpinned");
+
+    cfg.server_pin = good;
+    ASSERT_EQ_INT(mqvpn_platform_apply_client_config(lc, &cfg), MQVPN_OK, "pin good rc");
+    ASSERT_EQ_INT(lc->has_server_pin, 1, "pin good stored");
+    mqvpn_config_free(lc);
+
+    lc = mqvpn_config_new();
+    cfg.server_pin = "abc";
+    ASSERT_EQ_INT(mqvpn_platform_apply_client_config(lc, &cfg), MQVPN_ERR_INVALID_ARG,
+                  "pin bad rc");
+    ASSERT_EQ_INT(lc->has_server_pin, 0, "pin bad: not stored");
     mqvpn_config_free(lc);
 }
 
@@ -181,6 +211,7 @@ main(void)
 {
     test_all_fields_forwarded();
     test_defaults_and_fallbacks();
+    test_pin();
     printf("test_config_bridge: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

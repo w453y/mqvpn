@@ -171,6 +171,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `Address` | サーバーアドレス（`HOST:PORT`、IPv6 は `[2001:db8::1]:443` 形式） | 必須 |
 | `ServerName` | TLS SNI および証明書検証名。IP 直接接続でドメイン証明書を検証する場合に使用 | Address のホスト部 |
 | `Insecure` | TLS 証明書検証を省略する (自己署名のテスト構成のみ)。`false` ではシステムのストア (`/etc/ssl`。`SSL_CERT_FILE` / `SSL_CERT_DIR` で上書き可) で検証する。Linux/macOS (および custom trust path を使う Windows) では IP アドレス接続時に `ServerName` へ証明書の DNS 名を設定する。Windows の証明書ストアで検証する場合は IP literal が `iPAddress` SAN と直接照合される。Windows では Windows の証明書ストアで検証する。`SSL_CERT_FILE` (PEM バンドル) または `SSL_CERT_DIR` (ハッシュ化した証明書ディレクトリ) が設定されていれば、Linux と同様にそちらを使う。Android では端末の CA ストアとアプリの network security config で検証する。証明書が一致すべき名前は `tlsServerName` (`ServerName` の SDK 版) で、ブラケットなしのホスト名か IP リテラルを指定する。 | `false` |
+| `Pin` | サーバーの公開鍵の指紋 (「ピン」)。設定すると、その鍵を持つサーバーだけを信頼し、証明書の名前・有効期限・発行元は確認しない。サーバーで `mqvpn --show-link` が出力するリンクに入っている値。43 文字で、形式が正しくない値を書くとクライアントは起動しない。`Insecure = true` とは併用できず、両方を設定すると mqvpn は起動しない (`--connect` を使うときはリンクの内容で決まり、ファイルの `Pin` と `Insecure` は使われない)。JSON のキーは `pin`。 | なし |
 
 ### `[Interface]`
 

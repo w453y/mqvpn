@@ -12,6 +12,7 @@
 #include "mqvpn_sched_names.h"
 #include "redundant_tx.h"
 #include "json_util.h"
+#include "mqvpn_pin.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -259,6 +260,14 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     int iv = 0;
     if (!yyjson_is_obj(root)) goto out;
 
+    size_t ki, kmax;
+    yyjson_val *kk, *kv;
+    yyjson_obj_foreach(root, ki, kmax, kk, kv)
+    {
+        (void)kv;
+        if (mqvpn_pin_key_is_miscased(yyjson_get_str(kk))) goto out;
+    }
+
     /* Lenient keys: a value of the wrong type leaves the field unchanged
      * (json_copy_str / json_get_int write nothing on failure). Strict keys
      * fail the whole call instead. */
@@ -290,6 +299,15 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
 
     v = yyjson_obj_get(root, "insecure");
     if (yyjson_is_bool(v)) cfg->insecure = yyjson_get_bool(v);
+
+    /* Strict: a malformed pin must never silently become an unpinned config. */
+    v = yyjson_obj_get(root, "pin");
+    if (v) {
+        if (!yyjson_is_str(v) || yyjson_get_len(v) != MQVPN_PIN_STR_LEN ||
+            strlen(yyjson_get_str(v)) != MQVPN_PIN_STR_LEN || /* embedded NUL */
+            mqvpn_config_set_server_pin(cfg, yyjson_get_str(v)) != MQVPN_OK)
+            goto out;
+    }
 
     v = yyjson_obj_get(root, "multipath");
     if (yyjson_is_bool(v)) cfg->multipath = yyjson_get_bool(v);
@@ -574,6 +592,22 @@ mqvpn_config_set_cert_verifier(mqvpn_config_t *cfg, mqvpn_cert_verify_fn fn, voi
     cfg->cert_verify_fn = fn;
     cfg->cert_verify_ctx =
         fn ? ctx : NULL; /* no dangling ctx behind a cleared verifier */
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_server_pin(mqvpn_config_t *cfg, const char *pin)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (!pin || !pin[0]) {
+        cfg->has_server_pin = 0;
+        memset(cfg->server_pin, 0, sizeof(cfg->server_pin));
+        return MQVPN_OK;
+    }
+    uint8_t raw[MQVPN_PIN_LEN];
+    if (mqvpn_pin_decode(pin, raw) != 0) return MQVPN_ERR_INVALID_ARG;
+    memcpy(cfg->server_pin, raw, sizeof(raw));
+    cfg->has_server_pin = 1;
     return MQVPN_OK;
 }
 

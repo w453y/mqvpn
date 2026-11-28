@@ -22,3 +22,7 @@ Third-party software included:
   * yyjson (https://github.com/ibireme/yyjson)
     Copyright (c) 2020 YaoYuan <ibireme@gmail.com>
     MIT License — see third_party/yyjson/LICENSE
+
+  * QR Code generator library (https://github.com/nayuki/QR-Code-generator)
+    Copyright (c) Project Nayuki
+    MIT License — see third_party/qrcodegen/LICENSE

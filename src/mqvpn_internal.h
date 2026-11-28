@@ -159,6 +159,11 @@ struct mqvpn_config_s {
     mqvpn_cert_verify_fn cert_verify_fn;
     void *cert_verify_ctx;
 
+    /* Pinned server public key (SHA-256 of the leaf SPKI); valid only when
+     * has_server_pin is set. */
+    uint8_t server_pin[32];
+    int has_server_pin;
+
     /* Server-only fields */
     char listen_addr[256];
     int listen_port;
@@ -215,6 +220,18 @@ void mqvpn_config_apply_reorder(mqvpn_config_t *cfg, const mqvpn_reorder_config_
  * mqvpn_file_config_t) into `cfg`. Shared by the platform layers so every
  * surface honors hybrid config identically. */
 void mqvpn_config_apply_hybrid(mqvpn_config_t *cfg, const mqvpn_hybrid_config_t *src);
+
+/* ─── Client certificate decision (src/mqvpn_client.c) ─── */
+
+/* XQC_TLS_CERT_FLAG_* bits for this config: insecure > pin > verifier > library. */
+int mqvpn_client_cert_verify_flags(const mqvpn_config_t *cfg);
+
+/* The APP_VERIFY decision. 0 = trusted, -1 = reject. With a pin, only the pin is
+ * consulted (the verifier is not called); without one, the verifier. hostname is
+ * the effective SNI. */
+int mqvpn_client_cert_check(const mqvpn_config_t *cfg, const unsigned char *const certs[],
+                            const size_t cert_len[], size_t n_certs,
+                            const char *hostname);
 
 /* ─── Scheduler precondition predicate ─── */
 

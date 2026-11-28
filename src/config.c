@@ -14,6 +14,7 @@
 #include "user_spec.h"
 #include "libmqvpn.h"
 #include "log.h"
+#include "mqvpn_pin.h"
 #include "redundant_tx.h"
 
 #include <errno.h>
@@ -428,6 +429,7 @@ typedef enum {
     CFGK_U16,             /* uint16_t: max 0xffff                              */
     CFGK_U64,             /* 64-bit unsigned: inclusive max bound              */
     CFGK_HYBRID_TCP_MODE, /* mqvpn_hybrid_tcp_mode_t via parse_hybrid_tcp_mode */
+    CFGK_PIN,             /* char[]: server pin; a bad value fails the load    */
 } cfg_key_type_t;
 
 typedef struct {
@@ -531,6 +533,11 @@ cfgk_post_explicit_cap(mqvpn_file_config_t *cfg)
         (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                        \
             sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, (post) \
     }
+#define CFG_PIN(sec, ik, jk, field)                                        \
+    {                                                                      \
+        (sec), (ik), (jk), CFGK_PIN, CFGK_OFF(field),                      \
+            sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, NULL \
+    }
 #define CFG_BOOL(sec, ik, jk, field)                                          \
     {                                                                         \
         (sec), (ik), (jk), CFGK_BOOL, CFGK_OFF(field), 0, 0, NULL, 0, 0, NULL \
@@ -580,6 +587,7 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_STR(SEC_SERVER, "Address", "server_addr", server_addr),
     CFG_STR(SEC_SERVER, "ServerName", "tls_server_name", tls_server_name),
     CFG_BOOL(SEC_SERVER, "Insecure", "insecure", insecure),
+    CFG_PIN(SEC_SERVER, "Pin", "pin", server_pin),
     /* [TLS] */
     CFG_STR(SEC_TLS, "Cert", "cert_file", cert_file),
     CFG_STR(SEC_TLS, "Key", "key_file", key_file),
@@ -671,7 +679,8 @@ cfg_key_store(mqvpn_file_config_t *cfg, const cfg_key_desc_t *d, const char *v_s
     /* memcpy for sub-int/64-bit/enum fields avoids alignment+aliasing questions;
      * int fields store via *(int *) since the offset names a real int member. */
     switch (d->type) {
-    case CFGK_STR: snprintf(base, d->size, "%s", v_str); break;
+    case CFGK_STR:
+    case CFGK_PIN: snprintf(base, d->size, "%s", v_str); break;
     case CFGK_BOOL: *(int *)base = v_int; break;
     case CFGK_INT:
         /* forced-invalid sentinel from the walkers. Note: a genuine input of
@@ -732,6 +741,20 @@ cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const 
         switch (d->type) {
         case CFGK_STR:
         case CFGK_HYBRID_TCP_MODE: rc = cfg_key_store(cfg, d, val, 0, 0); break;
+        case CFGK_PIN: {
+            /* A malformed pin must never become an unpinned connection:
+             * check the raw value (before any truncation) and fail the load.
+             * The value is not logged. */
+            uint8_t raw[MQVPN_PIN_LEN];
+            if (mqvpn_pin_decode(val, raw) < 0) {
+                LOG_ERR("%s:%d: invalid [%s] %s; expected 43 base64url characters "
+                        "(see 'mqvpn --show-link' on the server)",
+                        path, lineno, section_name(section), d->ini_key);
+                return -1;
+            }
+            rc = cfg_key_store(cfg, d, val, 0, 0);
+            break;
+        }
         case CFGK_BOOL: {
             int bv = parse_bool(val);
             if (bv < 0) {
@@ -815,6 +838,19 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, yyjson_val *root, yyjson_val *ro,
             else
                 rc = cfg_key_store(cfg, d, sbuf, 0, 0);
             break;
+        case CFGK_PIN: {
+            uint8_t raw[MQVPN_PIN_LEN];
+            /* the length check also refuses an embedded NUL */
+            if (!yyjson_is_str(v) || yyjson_get_len(v) != MQVPN_PIN_STR_LEN ||
+                mqvpn_pin_decode(yyjson_get_str(v), raw) < 0) {
+                LOG_ERR("JSON: invalid %s%s; expected 43 base64url characters", scope,
+                        d->json_key);
+                bad = 1;
+                continue;
+            }
+            rc = cfg_key_store(cfg, d, yyjson_get_str(v), 0, 0);
+            break;
+        }
         case CFGK_BOOL:
             if (!yyjson_is_bool(v)) {
                 LOG_ERR("JSON: invalid %s%s; use true or false", scope, d->json_key);
@@ -969,6 +1005,14 @@ static void
 handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *val,
           int lineno, const char *path, int *bad)
 {
+    /* A Pin outside [Server] would be dropped as an unknown key and the
+     * client would connect unpinned: fail the load instead. */
+    if (strcasecmp(key, "Pin") == 0 && section != SEC_SERVER) {
+        LOG_ERR("%s:%d: invalid Pin: it belongs in [Server]", path, lineno);
+        *bad = 1;
+        return;
+    }
+
     /* Complex keys first (lists / repeated keys / rule slots). */
     switch (section) {
     case SEC_INTERFACE:
@@ -1117,6 +1161,18 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
 
     yyjson_val *v = NULL;
     char s32[32];
+
+    size_t ki, kmax;
+    yyjson_val *kk, *kv;
+    yyjson_obj_foreach(root, ki, kmax, kk, kv)
+    {
+        (void)kv;
+        if (mqvpn_pin_key_is_miscased(yyjson_get_str(kk))) {
+            LOG_ERR("JSON: invalid pin key '%s'; write it as \"pin\"",
+                    yyjson_get_str(kk));
+            goto out;
+        }
+    }
 
     /* Mode has no INI counterpart (INI infers from Listen/Address). */
     if (json_copy_str(yyjson_obj_get(root, "mode"), s32, sizeof(s32)) == 0) {

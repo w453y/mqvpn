@@ -20,6 +20,7 @@ typedef struct mqvpn_client_cfg_s {
     const char *tls_server_name; /* SNI / cert verify name (NULL = use server_addr) */
     const char *tun_name;        /* TUN device name */
     int insecure;                /* skip TLS cert verification */
+    const char *server_pin;      /* server public-key pin (NULL = no pin) */
     int log_level;               /* mqvpn_log_level_t */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES]; /* network interfaces for multipath */
     int path_backup[MQVPN_MAX_PATH_IFACES];         /* 1 = backup path */
@@ -61,8 +62,10 @@ typedef struct mqvpn_client_cfg_s {
  * every platform-independent field of `cfg` into `lib_cfg`. Shared by the
  * Linux/Windows/Darwin run loops so a new knob cannot be forwarded on one
  * platform and silently dropped on another (InitMaxPathId was, on Windows).
- * Platform-only knobs (Linux: UdpGso) stay at the call sites. */
-void mqvpn_platform_apply_client_config(mqvpn_config_t *lib_cfg,
-                                        const mqvpn_client_cfg_t *cfg);
+ * Platform-only knobs (Linux: UdpGso) stay at the call sites.
+ * Returns MQVPN_OK, or MQVPN_ERR_INVALID_ARG when cfg->server_pin is
+ * malformed; the caller must then not start the client. */
+int mqvpn_platform_apply_client_config(mqvpn_config_t *lib_cfg,
+                                       const mqvpn_client_cfg_t *cfg);
 
 #endif /* MQVPN_VPN_CLIENT_H */

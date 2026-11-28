@@ -19,7 +19,7 @@
 #include "vpn_client.h"
 #include "mqvpn_internal.h" /* mqvpn_config_apply_reorder / _apply_hybrid */
 
-void
+int
 mqvpn_platform_apply_client_config(mqvpn_config_t *lib_cfg, const mqvpn_client_cfg_t *cfg)
 {
     mqvpn_config_set_server(lib_cfg, cfg->server_addr, cfg->server_port);
@@ -27,6 +27,7 @@ mqvpn_platform_apply_client_config(mqvpn_config_t *lib_cfg, const mqvpn_client_c
         mqvpn_config_set_tls_server_name(lib_cfg, cfg->tls_server_name);
     if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
     mqvpn_config_set_insecure(lib_cfg, cfg->insecure);
+    int pin_rc = mqvpn_config_set_server_pin(lib_cfg, cfg->server_pin);
     mqvpn_config_set_multipath(lib_cfg, cfg->n_paths > 1 ? 1 : 0);
     mqvpn_config_set_reconnect(lib_cfg, cfg->reconnect,
                                cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 5);
@@ -55,4 +56,5 @@ mqvpn_platform_apply_client_config(mqvpn_config_t *lib_cfg, const mqvpn_client_c
     mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
     if (cfg->recv_rate_limit)
         mqvpn_config_set_recv_rate_limit(lib_cfg, cfg->recv_rate_limit);
+    return pin_rc;
 }

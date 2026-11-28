@@ -48,6 +48,8 @@
 #  include "hybrid/tcp_lane.h"
 #endif
 #include "icmp.h"
+#include "auth.h"
+#include "mqvpn_pin.h"
 #include "path_state_machine.h"
 #include "reorder.h"
 #include "reorder_gate.h"
@@ -1315,10 +1317,41 @@ cli_report_cert_rejected(cli_conn_t *conn)
     cli_signal_connect_fail(conn, MQVPN_ERR_TLS, 0);
 }
 
+int
+mqvpn_client_cert_verify_flags(const mqvpn_config_t *cfg)
+{
+    if (cfg->insecure) return XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
+    if (cfg->has_server_pin || cfg->cert_verify_fn)
+        return XQC_TLS_CERT_FLAG_NEED_VERIFY | XQC_TLS_CERT_FLAG_APP_VERIFY;
+    return XQC_TLS_CERT_FLAG_NEED_VERIFY;
+}
+
+int
+mqvpn_client_cert_check(const mqvpn_config_t *cfg, const unsigned char *const certs[],
+                        const size_t cert_len[], size_t n_certs, const char *hostname)
+{
+    if (cfg->has_server_pin) {
+        /* The pin is the only judge: every failure below rejects, never
+         * falls through to the verifier. */
+        uint8_t got[MQVPN_PIN_LEN];
+        if (n_certs == 0 || !certs || !cert_len || !certs[0]) return -1;
+        if (mqvpn_pin_from_cert_der(certs[0], cert_len[0], got) != 0) return -1;
+        return mqvpn_auth_ct_compare((const char *)got, MQVPN_PIN_LEN,
+                                     (const char *)cfg->server_pin, MQVPN_PIN_LEN) == 0
+                   ? 0
+                   : -1;
+    }
+    if (!cfg->cert_verify_fn) return -1;
+    return cfg->cert_verify_fn(certs, cert_len, n_certs, hostname,
+                               cfg->cert_verify_ctx) == 0
+               ? 0
+               : -1;
+}
+
 /* xquic hands us the chain the server presented (leaf first, DER). Reached
- * on every handshake when a verifier is configured (APP_VERIFY): the verifier
- * is the sole judge. Without a verifier, xquic's legacy path routes only an
- * unknown issuer (X509 error 20) here; refusing it is a library-side
+ * on every handshake when a pin or a verifier is configured (APP_VERIFY): the
+ * pin, else the verifier, is the sole judge. Without either, xquic's legacy path
+ * routes only an unknown issuer (X509 error 20) here; refusing it is a library-side
  * rejection like any other, reported by cb_cert_verify_failed, so this site
  * stays silent rather than report it twice. insecure never gets here:
  * verify_mode is NONE and xquic installs no callback. An empty chain is
@@ -1331,11 +1364,11 @@ cb_cert_verify(const unsigned char *certs[], const size_t cert_len[], size_t cer
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     const mqvpn_config_t *cfg = &conn->client->config;
 
-    if (!cfg->cert_verify_fn) return -1;
-    if (cfg->cert_verify_fn(certs, cert_len, certs_len, cli_effective_sni(cfg),
-                            cfg->cert_verify_ctx) == 0)
+    if (mqvpn_client_cert_check(cfg, certs, cert_len, certs_len,
+                                cli_effective_sni(cfg)) == 0)
         return 0;
-    cli_report_cert_rejected(conn);
+    /* No pin and no verifier: xquic's library path reports it (see above). */
+    if (cfg->has_server_pin || cfg->cert_verify_fn) cli_report_cert_rejected(conn);
     return -1;
 }
 
@@ -3139,19 +3172,13 @@ cli_start_connection(mqvpn_client_t *c)
     }
 
     /* One owner of the certificate decision, readable from the config alone:
-     * insecure → none (xquic never calls cb_cert_verify); verifier → the
-     * platform, on every handshake (APP_VERIFY); otherwise the library's root
+     * insecure → none (xquic never calls cb_cert_verify); pin or verifier → the
+     * platform or pin, on every handshake (APP_VERIFY); otherwise the library's root
      * store + hostname check. insecure must stay first: it takes precedence
      * over a verifier (mqvpn_client_new warned about that). */
     xqc_conn_ssl_config_t ssl_cfg;
     memset(&ssl_cfg, 0, sizeof(ssl_cfg));
-    if (c->config.insecure)
-        ssl_cfg.cert_verify_flag = XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
-    else if (c->config.cert_verify_fn)
-        ssl_cfg.cert_verify_flag =
-            XQC_TLS_CERT_FLAG_NEED_VERIFY | XQC_TLS_CERT_FLAG_APP_VERIFY;
-    else
-        ssl_cfg.cert_verify_flag = XQC_TLS_CERT_FLAG_NEED_VERIFY;
+    ssl_cfg.cert_verify_flag = mqvpn_client_cert_verify_flags(&c->config);
 
     const char *sni = cli_effective_sni(&c->config);
 
@@ -3349,6 +3376,9 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
      * warn once at creation rather than on every (re)connect. */
     if (c->config.insecure && c->config.cert_verify_fn)
         LOG_W(c, "insecure=1 overrides the configured certificate verifier: "
+                 "the server certificate will not be checked");
+    if (c->config.insecure && c->config.has_server_pin)
+        LOG_W(c, "insecure=1 overrides the configured server pin: "
                  "the server certificate will not be checked");
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED

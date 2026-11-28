@@ -30,6 +30,8 @@ rules belong here, reasons there.
   (`git submodule update --init --recursive` after checkout)
 - `third_party/yyjson` — vendored yyjson 0.13.0 (JSON parse/serialize;
   included only via `src/json_util.h`)
+- `third_party/qrcodegen` — vendored Nayuki QR-Code-generator 1.8.0 (C; used
+  only by the CLI to draw QR codes in the terminal)
 - `tests/` (unit tests, e2e shell scripts), `scripts/ci_e2e/` (netns e2e),
   `.github/workflows/ci.yml`; build and test commands are in CONTRIBUTING.md
   sections 3 and 4 (the CI `sanitizer` job uses the same configure)

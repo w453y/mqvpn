@@ -11,6 +11,11 @@
 #include "redundant_tx.h"
 #include "mqvpn_sched_names.h"
 #include "user_spec.h"
+#include "cli_connect.h"
+#include "mqvpn_pin.h"
+#if !defined(__APPLE__)
+#  include "show_link.h"
+#endif
 
 #include <xquic/xquic.h> /* for XQC_ENABLE_* compile-time defines */
 
@@ -55,6 +60,16 @@ usage(const char *prog)
         "  --key PATH                TLS private key (server mode)\n"
         "  --tls-server-name NAME    TLS SNI / cert verify name (client mode)\n"
         "  --insecure                Accept untrusted certs (client mode, testing only)\n"
+        "  --connect LINK            Connect with an mqvpn:// link (client mode)\n"
+        "                            The link alone decides how the server is checked\n"
+        "  --pin PIN                 Server public-key pin, 43 base64url characters\n"
+        "                            (client mode)\n"
+        "  --show-link               Print a connection link and QR code for this\n"
+        "                            server and exit (server mode)\n"
+        "  --host ADDR[:PORT]        Address clients use to reach this server\n"
+        "                            (with --show-link)\n"
+        "  --link-user NAME          Put this user's key in the link instead of the\n"
+        "                            global auth key (with --show-link)\n"
         "  --auth-key KEY            PSK for authentication\n"
         "  --user NAME:KEY[:IP]      Add a server user credential; IP fixes the user's "
         "VPN address (repeatable)\n"
@@ -158,6 +173,11 @@ main(int argc, char *argv[])
         {"cert", required_argument, NULL, 'c'},
         {"key", required_argument, NULL, 'k'},
         {"insecure", no_argument, NULL, 'i'},
+        {"connect", required_argument, NULL, 0x110},
+        {"pin", required_argument, NULL, 0x111},
+        {"show-link", no_argument, NULL, 0x112},
+        {"host", required_argument, NULL, 0x113},
+        {"link-user", required_argument, NULL, 0x114},
         {"auth-key", required_argument, NULL, 'a'},
         {"user", required_argument, NULL, 'u'},
         {"genkey", no_argument, NULL, 'G'},
@@ -200,6 +220,11 @@ main(int argc, char *argv[])
     int request_server_sched = -1;
     const char *tls_server_name = NULL;
     const char *auth_key = NULL;
+    const char *connect_str = NULL;
+    const char *cli_pin = NULL;
+    int show_link = 0;
+    const char *host_str = NULL;
+    const char *link_user = NULL;
     char cli_user_names[MQVPN_CONFIG_MAX_USERS][64];
     char cli_user_keys[MQVPN_CONFIG_MAX_USERS][256];
     char cli_user_ips[MQVPN_CONFIG_MAX_USERS][16];
@@ -329,6 +354,11 @@ main(int argc, char *argv[])
         case 'K': kill_switch = 1; break;
         case 0x103: manage_routes = 0; break; /* --no-manage-routes */
         case 0x104: tls_server_name = optarg; break;
+        case 0x110: connect_str = optarg; break;
+        case 0x111: cli_pin = optarg; break;
+        case 0x112: show_link = 1; break;
+        case 0x113: host_str = optarg; break;
+        case 0x114: link_user = optarg; break;
         case 0x105: allow_client_sched = 1; break;
         case 0x106: request_server_sched = 1; break;
         case 'X':
@@ -341,6 +371,59 @@ main(int argc, char *argv[])
         case 'V': printf("mqvpn %s\n", mqvpn_version_string()); return 0;
         case 'h': usage(argv[0]); return 0;
         default: usage(argv[0]); return 1;
+        }
+    }
+
+    if (host_str && !show_link) {
+        fprintf(stderr, "error: --host requires --show-link\n");
+        return 1;
+    }
+    if (link_user && !show_link) {
+        fprintf(stderr, "error: --link-user requires --show-link\n");
+        return 1;
+    }
+    if (show_link) {
+        /* --show-link is a server command, as --connect is a client one. */
+        if (connect_str || (mode && strcmp(mode, "client") == 0)) {
+            fprintf(stderr, "error: --show-link cannot be used with %s\n",
+                    connect_str ? "--connect" : "--mode client");
+            return 1;
+        }
+#if defined(__APPLE__)
+        fprintf(stderr, "error: server mode is not supported on macOS yet\n");
+        return 1;
+#endif
+        mode = "server";
+    }
+
+    /* --connect: the link replaces the whole server identity, so options that
+     * would set or weaken it are errors (checked after parsing, so the order
+     * of options does not matter). The link text is never printed. */
+    mqvpn_link_t link;
+    if (connect_str) {
+        const char *conflict = server_str                              ? "--server"
+                               : auth_key                              ? "--auth-key"
+                               : cli_pin                               ? "--pin"
+                               : insecure >= 0                         ? "--insecure"
+                               : (mode && strcmp(mode, "server") == 0) ? "--mode server"
+                                                                       : NULL;
+        if (conflict) {
+            fprintf(stderr, "error: --connect cannot be used with %s\n", conflict);
+            return 1;
+        }
+        memset(&link, 0, sizeof(link));
+        link.struct_size = sizeof(link);
+        if (mqvpn_link_parse(connect_str, &link) != MQVPN_OK) {
+            fprintf(stderr, "error: invalid connection link\n");
+            return 1;
+        }
+        mode = "client";
+    }
+    if (cli_pin) {
+        uint8_t pin_raw[32];
+        if (mqvpn_pin_decode(cli_pin, pin_raw) < 0) {
+            fprintf(stderr, "error: invalid pin: expected 43 base64url characters\n");
+            return 1;
         }
     }
 
@@ -467,6 +550,39 @@ main(int argc, char *argv[])
         }
     }
 
+#if !defined(__APPLE__)
+    /* --show-link: print the link for this server's config and exit; the
+     * server is not started. */
+    if (show_link) {
+        const char *link_key = eff_auth_key;
+        if (link_user) {
+            link_key = NULL;
+            for (int i = 0; i < eff_n_users; i++) {
+                /* no break: a repeated name keeps its last key, as the server does */
+                if (strcmp(eff_user_names[i], link_user) == 0)
+                    link_key = eff_user_keys[i];
+            }
+            if (!link_key) {
+                /* the name is not echoed: NAME:KEY typed here would leak the key */
+                fprintf(stderr, "error: --link-user: no user with that name\n");
+                return 1;
+            }
+        }
+        if (!link_key || link_key[0] == '\0') {
+            fprintf(stderr, "error: --show-link needs an auth key: set --auth-key or "
+                            "[Auth] Key, or pick a user with --link-user NAME\n");
+            return 1;
+        }
+        char bind_addr[256] = "0.0.0.0";
+        int bind_port = 443;
+        if (parse_host_port(eff_listen, bind_addr, sizeof(bind_addr), &bind_port,
+                            "listen") < 0) {
+            return 1;
+        }
+        return show_link_run(bind_addr, bind_port, eff_cert, link_key, host_str, stdout);
+    }
+#endif
+
     /* Set log level */
     mqvpn_log_level_t log_level = MQVPN_LOG_INFO;
     if (strcmp(eff_log_level, "debug") == 0)
@@ -567,18 +683,27 @@ main(int argc, char *argv[])
     }
 
     if (strcmp(eff_mode, "client") == 0) {
-        if (!eff_server || eff_server[0] == '\0') {
-            fprintf(stderr, "error: --server is required for client mode\n");
+        char host[256] = "";
+        int port = 0;
+        if (!connect_str) { /* the link supplies the address itself */
+            if (!eff_server || eff_server[0] == '\0') {
+                fprintf(stderr, "error: --server is required for client mode\n");
+                return 1;
+            }
+            if (parse_host_port(eff_server, host, sizeof(host), &port, "server") < 0) {
+                return 1;
+            }
+        }
+
+        /* The library lets insecure win over the pin; refuse the combination so a
+         * pinned config is never silently unchecked. A link forces insecure off. */
+        if (!connect_str && eff_insecure && (cli_pin || file_cfg.server_pin[0])) {
+            fprintf(stderr, "error: a server pin cannot be used with insecure mode: "
+                            "remove --insecure / Insecure, or remove the pin\n");
             return 1;
         }
 
-        char host[256];
-        int port;
-        if (parse_host_port(eff_server, host, sizeof(host), &port, "server") < 0) {
-            return 1;
-        }
-
-        if (eff_insecure) {
+        if (eff_insecure && !connect_str) {
             LOG_WRN("--insecure: accepting untrusted certificates");
         }
 
@@ -595,6 +720,9 @@ main(int argc, char *argv[])
             .tls_server_name = eff_tls_name,
             .tun_name = eff_tun_name,
             .insecure = eff_insecure,
+            .server_pin = cli_pin                  ? cli_pin
+                          : file_cfg.server_pin[0] ? file_cfg.server_pin
+                                                   : NULL,
             .log_level = log_level,
             .n_paths = n_paths,
             .scheduler = scheduler,
@@ -659,6 +787,7 @@ main(int argc, char *argv[])
         for (int i = 0; i < n_dns; i++) {
             cfg.dns_servers[i] = dns_servers[i];
         }
+        if (connect_str) cli_connect_apply(&cfg, &link, tls_server_name);
 #ifdef _WIN32
         return win_platform_run_client(&cfg);
 #elif defined(__APPLE__)

@@ -318,6 +318,26 @@ TEST(config_load_json)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_load_json_pin)
+{
+    static const char good[] = "I7FvtHlDziB1xdZGyn_LS3mEDKTQoCGvgGp4_4HRzvM";
+    char json[256];
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"pin\":123}"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"pin\":\"abc\"}"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"pin\":\"\"}"), MQVPN_ERR_INVALID_ARG);
+    /* 43 bytes that start with a NUL must not read as "clear the pin" */
+    ASSERT_EQ(mqvpn_config_load_json(
+                  cfg, "{\"pin\":\"\\u0000AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"Pin\":\"abc\"}"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->has_server_pin, 0);
+    snprintf(json, sizeof(json), "{\"pin\":\"%s\"}", good);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_OK);
+    ASSERT_EQ(cfg->has_server_pin, 1);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_load_json_duplicate_users_last_wins)
 {
     const char *json = "{"
@@ -4461,6 +4481,7 @@ main(void)
     run_config_load_json();
     run_config_set_redundant_validates();
     run_config_json_redundant();
+    run_config_load_json_pin();
     run_config_load_json_duplicate_users_last_wins();
     run_config_load_json_invalid_users();
     run_config_load_json_users_brace_in_string_value();

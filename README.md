@@ -145,7 +145,7 @@ sudo apt install ./mqvpn_${V}_$A.deb ./mqvpn-server_${V}_$A.deb
 
 The install generates a self-signed TLS certificate, an auth key, and the server config at `/etc/mqvpn/server.conf`, then starts the server and registers it for automatic startup on boot. It keeps a certificate or config that already exists. The generated config turns on hybrid mode and the reorder buffer on the server side; each takes effect only for clients that also turn it on. It also sets `AllowClientScheduler = true`, so a client can ask for its own download scheduler.
 
-The install prints the auth key. To show it again:
+The install prints the auth key and a connection link with a QR code. To show them again:
 
 ```bash
 sudo mqvpn-server-info
@@ -175,7 +175,7 @@ More details, including all settings: `/usr/share/doc/mqvpn-server/README.Debian
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh | sudo bash
 ```
 
-This downloads the latest release, installs the binary to `/usr/local`, and generates the same certificate, auth key, and server config as the deb. Add `--start` to start the server and register it for automatic startup on boot:
+This downloads the latest release, installs the binary to `/usr/local`, and generates the same certificate, auth key, and server config as the deb. It also installs `mqvpn-server-info` and runs it at the end, to print the connection link and QR code. Add `--start` to start the server and register it for automatic startup on boot:
 
 ```bash
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
@@ -195,7 +195,7 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
     | sudo bash -s -- --uninstall
 ```
 
-> **Note:** The self-signed certificate requires `--insecure` on the client. For production, replace with a trusted certificate (e.g. Let's Encrypt) and omit `--insecure`. Point `--cert` (or `Cert` / `cert_file` in a config file) at the full chain file (for Let's Encrypt, `fullchain.pem`): clients do not fetch missing intermediates.
+> **Note:** Connecting with the link is safe with the self-signed certificate the install generates, because the link carries the fingerprint of the server's public key (the "pin"). To run the server under a domain name, replace the certificate with one from a certificate authority such as Let's Encrypt; both are supported. `--insecure` skips the server check and is for testing only; if a client config still has `Insecure = true`, remove that line when you use a pin or a link. Point `--cert` (or `Cert` / `cert_file` in a config file) at the full chain file (for Let's Encrypt, `fullchain.pem`): clients do not fetch missing intermediates.
 
 ### Client (Debian and Ubuntu)
 
@@ -232,21 +232,28 @@ A `SHA256SUMS` file is also attached to each release.
 
 ## Quick Start
 
-After installing the server and client (see [Installation](#installation)), run the commands below. Replace `443` with the port of your server. They use `--insecure` for a self-signed certificate; omit it if the server has a trusted certificate.
+After installing the server and client (see [Installation](#installation)), show the connection link on the server:
+
+```bash
+sudo mqvpn-server-info
+```
+
+It prints the link and a QR code of it (the QR code is drawn only when the command runs in a terminal; when its output is piped or saved to a file, the QR code is left out) and, in a terminal, the command to run on the client. The link holds the server address, the auth key and the pin. Then connect on the client (keep the link in single quotes; in the Windows Command Prompt, use double quotes instead):
 
 ```bash
 # Client (single path)
-sudo mqvpn --mode client --server YOUR_SERVER:443 \
-    --auth-key YOUR_AUTH_KEY --insecure
+sudo mqvpn --connect 'mqvpn://203.0.113.5:443?key=YOUR_KEY&pin=YOUR_PIN'
 
 # Client (multipath)
-sudo mqvpn --mode client --server YOUR_SERVER:443 \
-    --auth-key YOUR_AUTH_KEY --path eth0 --path wlan0 --insecure
+sudo mqvpn --connect 'mqvpn://203.0.113.5:443?key=YOUR_KEY&pin=YOUR_PIN' \
+    --path eth0 --path wlan0
 
 # Client (with DNS override)
-sudo mqvpn --mode client --server YOUR_SERVER:443 \
-    --auth-key YOUR_AUTH_KEY --dns 1.1.1.1 --dns 8.8.8.8 --insecure
+sudo mqvpn --connect 'mqvpn://203.0.113.5:443?key=YOUR_KEY&pin=YOUR_PIN' \
+    --dns 1.1.1.1 --dns 8.8.8.8
 ```
+
+> **The link and QR code contain the auth key.** Treat them like a password. The Android and iOS apps do not read the QR code yet; any QR reader shows the `mqvpn://…` text. On a server with a private address (as on AWS or GCP), `mqvpn-server-info` asks `ifconfig.me` once for the public address; use `--host ADDR[:PORT]` to give it yourself and ask nothing. Without the link, use `--server`, `--auth-key` and `--pin`; see the [getting started guide](website/guide/getting-started.md).
 
 > **Notes:**
 > - On Linux, without `--path`, the client uses the default interface (single path); multipath requires two or more `--path` flags. On Windows, `--path` is always required (one or more); see `docs/windows_build.md`.
@@ -808,6 +815,11 @@ cd android && ./gradlew test                # Android SDK unit tests
 mqvpn [--config PATH] --mode client|server [options]
 
   --server IP:PORT       Server address (client)
+  --connect LINK         Connect with an mqvpn:// link (client)
+  --pin PIN              Server public-key pin (client)
+  --show-link            Print a connection link and QR code, then exit (server)
+  --host ADDR[:PORT]     Address clients use to reach this server (with --show-link)
+  --link-user NAME       Put this user's key in the link (with --show-link)
   --path IFACE           Multipath interface (repeatable)
   --backup-path IFACE    Backup interface for --scheduler failover (repeatable)
   --auth-key KEY         PSK authentication

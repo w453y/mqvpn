@@ -528,7 +528,11 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
         return 1;
     }
 
-    mqvpn_platform_apply_client_config(lib_cfg, cfg);
+    if (mqvpn_platform_apply_client_config(lib_cfg, cfg) != MQVPN_OK) {
+        LOG_ERR("invalid server pin; refusing to start");
+        mqvpn_config_free(lib_cfg);
+        return 1;
+    }
     /* Linux-only knob, deliberately outside the shared bridge (vpn_client.h).
      * Unconditional: 0 is a meaningful explicit-disable, not "unset". */
     mqvpn_config_set_udp_gso(lib_cfg, cfg->udp_gso);

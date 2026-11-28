@@ -120,6 +120,7 @@ do_uninstall() {
 
     info "Removing files..."
     rm -f "$INSTALL_PREFIX/bin/mqvpn"
+    rm -f "$INSTALL_PREFIX/bin/mqvpn-server-info"
     rm -f "$INSTALL_PREFIX/lib/libmqvpn.so"*
     rm -f "$INSTALL_PREFIX/lib/libxquic.so"
     rm -rf "$INSTALL_PREFIX/lib/mqvpn"
@@ -221,6 +222,7 @@ $missing
 Install them first (libevent: apt-get install libevent-2.1-7t64, or libevent-2.1-7 on older releases)"
 
 install -m 755 bin/mqvpn "$INSTALL_PREFIX/bin/mqvpn"
+install -m 755 bin/mqvpn-server-info "$INSTALL_PREFIX/bin/mqvpn-server-info"
 shopt -s nullglob
 libmqvpn_files=(lib/libmqvpn.so.*)
 shopt -u nullglob
@@ -240,6 +242,7 @@ install -m 644 LICENSE                "$INSTALL_PREFIX/share/doc/mqvpn/LICENSE"
 install -m 644 NOTICE                 "$INSTALL_PREFIX/share/doc/mqvpn/NOTICE"
 install -m 644 third-party/xquic.txt     "$INSTALL_PREFIX/share/doc/mqvpn/third-party/xquic.txt"
 install -m 644 third-party/boringssl.txt "$INSTALL_PREFIX/share/doc/mqvpn/third-party/boringssl.txt"
+install -m 644 third-party/qrcodegen.txt "$INSTALL_PREFIX/share/doc/mqvpn/third-party/qrcodegen.txt"
 
 ldconfig
 
@@ -395,8 +398,6 @@ if [ "$START" -eq 1 ]; then
 
     sleep 1
     if systemctl is-active --quiet mqvpn-server; then
-        SERVER_IP=$(curl -fsSL -4 --max-time 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
-
         echo ""
         ok "mqvpn server is running"
         echo ""
@@ -404,10 +405,6 @@ if [ "$START" -eq 1 ]; then
         echo "  Port:      ${PORT}/udp"
         echo "  Subnet:    $SUBNET"
         [ -n "${SUBNET6:-}" ] && echo "  Subnet6:   $SUBNET6"
-        echo ""
-        echo "  Client:"
-        echo "    sudo mqvpn --mode client --server ${SERVER_IP}:${PORT} \\"
-        echo "        --auth-key \"$AUTH_KEY\" --insecure"
         echo ""
     else
         err "mqvpn-server failed to start. Check: journalctl -u mqvpn-server"
@@ -429,3 +426,7 @@ else
     echo "    sudo systemctl enable --now mqvpn-server"
     echo ""
 fi
+
+# Connection link and QR code. PATH is set so mqvpn is found even when sudo
+# strips /usr/local/bin.
+PATH="$INSTALL_PREFIX/bin:$PATH" "$INSTALL_PREFIX/bin/mqvpn-server-info" || true

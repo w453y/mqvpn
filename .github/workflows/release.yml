@@ -145,9 +145,9 @@ jobs:
         run: |
           set -e
           deb=$(ls build/mqvpn_*.deb)
-          expected=5
+          expected=6
           found=$(dpkg-deb -c "$deb" \
-                  | grep -cE 'usr/share/doc/mqvpn/(LICENSE|NOTICE|third-party/(xquic|boringssl|lwip)\.txt)$' \
+                  | grep -cE 'usr/share/doc/mqvpn/(LICENSE|NOTICE|third-party/(xquic|boringssl|lwip|qrcodegen)\.txt)$' \
                   || true)
           if [ "$found" -ne "$expected" ]; then
             echo "::error::deb missing license files (found $found of $expected)"
@@ -169,6 +169,7 @@ jobs:
           STAGING="mqvpn_${VERSION}_${{ matrix.arch }}"
           mkdir -p "$STAGING"/{bin,lib/mqvpn,systemd,etc/mqvpn}
           cp build/mqvpn "$STAGING/bin/"
+          cp scripts/mqvpn-server-info.sh "$STAGING/bin/mqvpn-server-info"
           cp build/libmqvpn.so* "$STAGING/lib/" 2>/dev/null || true
           cp third_party/xquic/build/libxquic.so "$STAGING/lib/"
           cp scripts/mqvpn-server-nat.sh "$STAGING/lib/mqvpn/"
@@ -183,6 +184,7 @@ jobs:
           cp third_party/xquic/LICENSE                       "$STAGING/third-party/xquic.txt"
           cp third_party/xquic/third_party/boringssl/LICENSE "$STAGING/third-party/boringssl.txt"
           cp third_party/lwip/LICENSE                        "$STAGING/third-party/lwip.txt"
+          cp third_party/qrcodegen/LICENSE                   "$STAGING/third-party/qrcodegen.txt"
           tar czf "mqvpn_${VERSION}_${{ matrix.arch }}.tar.gz" -C "$STAGING" .
           rm -rf "$STAGING" build-tarball
 
@@ -191,9 +193,9 @@ jobs:
         run: |
           set -e
           tarball=$(ls mqvpn_*.tar.gz)
-          expected=5
+          expected=6
           found=$(tar tzf "$tarball" \
-                  | grep -cE '^\./(LICENSE|NOTICE|third-party/(xquic|boringssl|lwip)\.txt)$' \
+                  | grep -cE '^\./(LICENSE|NOTICE|third-party/(xquic|boringssl|lwip|qrcodegen)\.txt)$' \
                   || true)
           if [ "$found" -ne "$expected" ]; then
             echo "::error::tarball missing license files (found $found of $expected)"
@@ -208,7 +210,7 @@ jobs:
         run: |
           set -e
           tarball=$(ls mqvpn_*.tar.gz)
-          for f in lib/mqvpn/mqvpn-server-nat.sh lib/mqvpn/mqvpn-nat-config \
+          for f in bin/mqvpn-server-info lib/mqvpn/mqvpn-server-nat.sh lib/mqvpn/mqvpn-nat-config \
                    systemd/mqvpn-server.service etc/mqvpn/server.conf.example; do
             if ! tar tzf "$tarball" | grep -qxF "./$f"; then
               echo "::error::tarball is missing $f (install.sh needs it)"
@@ -526,6 +528,7 @@ jobs:
           Copy-Item "third_party/xquic/third_party/boringssl/LICENSE" "$tpl/boringssl.txt"
           Copy-Item "wintun-extract/wintun/LICENSE.txt" "$tpl/wintun.txt"
           Copy-Item "third_party/lwip/LICENSE" "$tpl/lwip.txt"
+          Copy-Item "third_party/qrcodegen/LICENSE" "$tpl/qrcodegen.txt"
           $triplet = if ($env:MATRIX_ARCH -eq 'amd64') { 'x64-windows-static' } else { 'arm64-windows-static' }
           $libevent_lic = "$env:VCPKG_INSTALLATION_ROOT/installed/$triplet/share/libevent/copyright"
           if (-not (Test-Path $libevent_lic)) {
@@ -570,7 +573,8 @@ jobs:
             '^THIRD_PARTY_LICENSES/boringssl\.txt$',
             '^THIRD_PARTY_LICENSES/wintun\.txt$',
             '^THIRD_PARTY_LICENSES/libevent\.txt$',
-            '^THIRD_PARTY_LICENSES/lwip\.txt$'
+            '^THIRD_PARTY_LICENSES/lwip\.txt$',
+            '^THIRD_PARTY_LICENSES/qrcodegen\.txt$'
           )
           $missing = @()
           foreach ($pat in $expected) {

@@ -735,7 +735,11 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     /* Shared CLI→library bridge (vpn_client.h) — the per-platform copy this
      * replaces once dropped InitMaxPathId on Windows only. */
-    mqvpn_platform_apply_client_config(lib_cfg, cfg);
+    if (mqvpn_platform_apply_client_config(lib_cfg, cfg) != MQVPN_OK) {
+        LOG_ERR("invalid server pin; refusing to start");
+        mqvpn_config_free(lib_cfg);
+        return 1;
+    }
 
     /* Create callbacks */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;

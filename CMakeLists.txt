@@ -239,6 +239,8 @@ set(MQVPN_LIB_SOURCES
     src/mqvpn_server.c
     src/mqvpn_conn_settings.c
     src/mqvpn_engine_keys.c
+    src/mqvpn_pin.c
+    src/mqvpn_link.c
     src/mqvpn_util.c
     src/path_state_machine.c
     src/flow_sched.c
@@ -254,6 +256,8 @@ set(MQVPN_LIB_SOURCES
 )
 
 include_directories(${CMAKE_SOURCE_DIR}/third_party/yyjson)
+# qrcodegen: used only by the CLI's terminal QR drawing (src/qr_term.c).
+include_directories(${CMAKE_SOURCE_DIR}/third_party/qrcodegen)
 
 # Vendored code: silence its warnings only (first-party -Werror / /WX stay).
 # COMPILE_FLAGS (a string) because the COMPILE_OPTIONS source property needs
@@ -264,13 +268,15 @@ if(MSVC)
 else()
     set(YYJSON_WARN_FLAGS "-w")
 endif()
+set_source_files_properties(third_party/qrcodegen/qrcodegen.c PROPERTIES
+    COMPILE_FLAGS "${YYJSON_WARN_FLAGS}")
 set_source_files_properties(third_party/yyjson/yyjson.c PROPERTIES
     COMPILE_FLAGS "${YYJSON_WARN_FLAGS}"
     COMPILE_DEFINITIONS "YYJSON_DISABLE_FILE;YYJSON_DISABLE_UTILS;YYJSON_DISABLE_INCR_READER;YYJSON_READER_DEPTH_LIMIT=32")
 
-# The only library file that calls BoringSSL directly: xquic exports neither a
-# random source nor a MAC.
-set_source_files_properties(src/mqvpn_engine_keys.c PROPERTIES
+# The only files that call BoringSSL directly (show_link.c is CLI-only): xquic exports neither a
+# random source, a MAC nor a SPKI parser.
+set_source_files_properties(src/mqvpn_engine_keys.c src/mqvpn_pin.c src/show_link.c PROPERTIES
     COMPILE_FLAGS "-I\"${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/include\"")
 
 # ---------- bundled transport implementations (NOT part of the sans-I/O core) ----------
@@ -482,6 +488,7 @@ set(WINTUN_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party/wintun)
 # ---------- mqvpn CLI binary (Windows) ----------
 add_executable(mqvpn
     src/main.c
+    src/cli_connect.c
     src/platform/client_config_bridge.c
     src/platform/windows/platform_windows.c
     src/platform/windows/tun_wintun.c
@@ -493,6 +500,9 @@ add_executable(mqvpn
     src/platform/windows/cert_verify.c
     src/config.c
     src/compat/getopt.c
+    src/qr_term.c
+    src/show_link.c
+    third_party/qrcodegen/qrcodegen.c
 )
 
 target_include_directories(mqvpn PRIVATE
@@ -609,6 +619,7 @@ elseif(APPLE)
 # tun.c/dns.c and fail to compile on Darwin).
 add_executable(mqvpn
     src/main.c
+    src/cli_connect.c
     src/platform/client_config_bridge.c
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c
@@ -848,6 +859,7 @@ endif()
 # Links libmqvpn for the library API; keeps platform-specific files separate.
 add_executable(mqvpn
     src/main.c
+    src/cli_connect.c
     src/platform/client_config_bridge.c
     src/platform/linux/platform_linux.c
     src/platform/linux/netlink_mon.c
@@ -863,6 +875,9 @@ add_executable(mqvpn
     src/platform/linux/dns.c
     src/platform/posix/dns_common.c
     src/config.c
+    src/qr_term.c
+    src/show_link.c
+    third_party/qrcodegen/qrcodegen.c
 )
 
 target_include_directories(mqvpn PRIVATE
@@ -971,6 +986,10 @@ if(BUILD_TESTING)
     # forwarded by mqvpn_platform_apply_client_config so a new knob cannot be
     # bridged on one platform and dropped on another (see the bridge TU).
     add_executable(test_config_bridge tests/test_config_bridge.c src/platform/client_config_bridge.c src/mqvpn_config.c src/redundant_tx.c src/log.c third_party/yyjson/yyjson.c)
+    # CLI link handling: the unit test needs only cli_connect.c.
+    add_executable(test_cli_connect tests/test_cli_connect.c src/cli_connect.c)
+    # Terminal QR drawing: the unit test compiles qr_term.c and qrcodegen.c itself.
+    add_executable(test_qr_term tests/test_qr_term.c src/qr_term.c third_party/qrcodegen/qrcodegen.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
     add_executable(test_icmp tests/test_icmp.c src/icmp.c)
     # test_reorder_gate exercises src/reorder_gate.h (shared STAMP/RAW/DROP_MTU
@@ -986,7 +1005,7 @@ if(BUILD_TESTING)
     # Sizes of the structs the getters fill in, per soname (compile-time only).
     add_executable(test_abi_sizes tests/test_abi_sizes.c)
     target_compile_definitions(test_abi_sizes PRIVATE MQVPN_SOVERSION=${MQVPN_SOVERSION})
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line test_clock_source test_abi_sizes)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_status test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_cli_connect test_qr_term test_classifier test_icmp test_reorder_gate test_path_readd test_path_line test_clock_source test_abi_sizes)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
@@ -1351,6 +1370,38 @@ if(BUILD_TESTING)
     set_target_properties(test_engine_keys PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_engine_keys COMMAND test_engine_keys)
 
+    add_executable(test_pin tests/test_pin.c)
+    target_link_libraries(test_pin mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_pin PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    target_compile_definitions(test_pin PRIVATE TEST_CERT_DIR="${CMAKE_SOURCE_DIR}/tests/certs")
+    set_target_properties(test_pin PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_pin COMMAND test_pin)
+
+    add_executable(test_link tests/test_link.c)
+    target_link_libraries(test_link mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_link PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    set_target_properties(test_link PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_link COMMAND test_link)
+
+    # --show-link: includes src/show_link.c itself (see the test) to replace its
+    # route probe, so the unit is not in the source list. BoringSSL headers are
+    # explicit (SYSTEM) so the test cannot pick up a system OpenSSL.
+    add_executable(test_show_link tests/test_show_link.c src/qr_term.c third_party/qrcodegen/qrcodegen.c)
+    target_link_libraries(test_show_link mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_show_link PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    target_include_directories(test_show_link SYSTEM PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/include)
+    target_compile_definitions(test_show_link PRIVATE TEST_CERT_DIR="${CMAKE_SOURCE_DIR}/tests/certs")
+    set_target_properties(test_show_link PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_show_link COMMAND test_show_link)
+
+    add_executable(test_cert_decision tests/test_cert_decision.c)
+    target_link_libraries(test_cert_decision mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_cert_decision PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    target_compile_definitions(test_cert_decision PRIVATE TEST_CERT_DIR="${CMAKE_SOURCE_DIR}/tests/certs")
+    set_target_properties(test_cert_decision PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_cert_decision COMMAND test_cert_decision)
+
     # Server-side mqvpn-tcp dispatch test (real xquic engine, gated on the
     # server-side egress being built — see SVR_STREAM_ROLE_CONNECT_TCP).
     if(MQVPN_HYBRID_TCP_EGRESS_BUILD)
@@ -1371,6 +1422,8 @@ if(BUILD_TESTING)
 
     add_test(NAME test_cli_config
         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_config.sh $<TARGET_FILE:mqvpn>)
+    add_test(NAME test_cli_connect_sh
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_connect.sh $<TARGET_FILE:mqvpn>)
     add_test(NAME test_nat_config
         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_nat_config.sh
             $<TARGET_FILE:mqvpn-nat-config> ${CMAKE_SOURCE_DIR}/scripts/mqvpn-server-nat.sh)
@@ -1474,6 +1527,10 @@ install(FILES
 install(FILES
     "${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/LICENSE"
     DESTINATION share/doc/mqvpn/third-party RENAME boringssl.txt
+    COMPONENT runtime OPTIONAL)
+install(FILES
+    "${CMAKE_SOURCE_DIR}/third_party/qrcodegen/LICENSE"
+    DESTINATION share/doc/mqvpn/third-party RENAME qrcodegen.txt
     COMPONENT runtime OPTIONAL)
 # lwIP is statically linked only when the hybrid TCP lane is built in.
 if(MQVPN_HYBRID_TCP_LANE_BUILD)

@@ -681,6 +681,24 @@ MQVPN_API int mqvpn_config_set_allow_client_scheduler(mqvpn_config_t *cfg, int e
 MQVPN_API int mqvpn_config_set_request_server_scheduler(mqvpn_config_t *cfg, int enabled);
 MQVPN_API int mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc);
 
+/* A parsed mqvpn://HOST[:PORT]?key=<auth key>[&pin=<pin>] connection link. */
+typedef struct mqvpn_link_s {
+    uint32_t struct_size; /* caller sets sizeof(mqvpn_link_t) before the call */
+    char host[256];       /* IPv4, IPv6 without brackets, or hostname */
+    int port;             /* 443 when the link has none */
+    char auth_key[256];   /* percent-decoded */
+    char pin[44];         /* "" when the link has no pin */
+} mqvpn_link_t;
+
+/* Parse only; touches no config. Form: mqvpn://HOST[:PORT]?key=...&pin=...
+ * (an IPv6 host is written in brackets in the link and returned without them).
+ * key is required, pin optional. Values are percent-decoded once; outside an
+ * escape only A-Z a-z 0-9 - . _ ~ may appear. key and pin are the only
+ * parameters, matched exactly in lower case: any other name (PIN, xpin, an
+ * empty one, ...) is rejected. Strict: anything ambiguous or malformed is an
+ * error. On error returns MQVPN_ERR_INVALID_ARG and leaves *out unchanged. */
+MQVPN_API int mqvpn_link_parse(const char *link, mqvpn_link_t *out);
+
 /* Reinjection (speculative multipath duplication of unacked data). OFF by
  * default. The deadline-mode params are validated as a group: srtt_factor_pct
  * in [100,1000] (percent, e.g. 110 = 1.10x srtt), hard_deadline_ms and
@@ -872,9 +890,9 @@ MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_f
  * full TLS handshake, on the thread that drives tick(); it must not re-enter
  * libmqvpn. A resumed TLS 1.3 session would reuse the original decision
  * without calling it again (the client does not feed session tickets back
- * today, so every handshake is a full one). When set, the verifier is the
- * sole judge of chain and hostname — the library's root store is not
- * consulted. When unset, the library verifies against its default root
+ * today, so every handshake is a full one). When set and no pin is set, the
+ * verifier is the sole judge of chain and hostname — the library's root store
+ * is not consulted. When unset, the library verifies against its default root
  * paths (by default /etc/ssl/cert.pem and /etc/ssl/certs from the
  * build-time OPENSSLDIR, overridable with SSL_CERT_FILE / SSL_CERT_DIR; on
  * macOS that is the system-provided bundle, not the Keychain). Platforms
@@ -886,13 +904,26 @@ MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_f
  * client then goes to CLOSED even with reconnect enabled. insecure=1
  * checks nothing, so it never reports MQVPN_ERR_TLS, and
  * takes precedence over a verifier (a WARN is logged at client creation).
- * Passing fn=NULL restores library-side verification (ctx is ignored). ctx
+ * Passing fn=NULL restores library-side verification when no pin is set
+ * (ctx is ignored). ctx
  * must stay valid until the client is destroyed (the config is copied at
- * client creation). */
+ * client creation). When a server pin is set (mqvpn_config_set_server_pin),
+ * the verifier is not called: the pin is the sole judge (hostname, expiry and
+ * issuer are not looked at). The pin is checked on every full handshake;
+ * whoever adds session resumption must not skip the check on a pinned
+ * connection. */
 typedef int (*mqvpn_cert_verify_fn)(const uint8_t *const certs[], const size_t cert_len[],
                                     size_t n_certs, const char *hostname, void *ctx);
 MQVPN_API int mqvpn_config_set_cert_verifier(mqvpn_config_t *cfg, mqvpn_cert_verify_fn fn,
                                              void *ctx);
+
+/* Client only. Pin the server by its public key: pin is the 43-character
+ * base64url SHA-256 of the server leaf certificate's SubjectPublicKeyInfo.
+ * NULL or "" clears it. A malformed pin returns MQVPN_ERR_INVALID_ARG and
+ * changes nothing: the caller MUST check the result and not create a client,
+ * or the connection is unpinned. Precedence: insecure > pin > verifier > root
+ * store. See mqvpn_config_set_cert_verifier for what a pin replaces. */
+MQVPN_API int mqvpn_config_set_server_pin(mqvpn_config_t *cfg, const char *pin);
 
 /* Server-only config */
 MQVPN_API int mqvpn_config_set_listen(mqvpn_config_t *cfg, const char *addr, int port);

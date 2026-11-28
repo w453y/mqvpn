@@ -15,6 +15,7 @@
 #include <stddef.h> /* size_t */
 
 #include "libmqvpn.h"          /* for MQVPN_MAX_PATHS, MQVPN_MAX_USERS */
+#include "mqvpn_pin.h"         /* MQVPN_PIN_STR_LEN */
 #include "reorder.h"           /* for embedded mqvpn_reorder_config_t (§16.1 INI) */
 #include "hybrid/classifier.h" /* for embedded mqvpn_hybrid_config_t ([Hybrid]) */
 
@@ -44,6 +45,7 @@ typedef struct mqvpn_file_config_s {
     char server_addr[280]; /* "host:port" */
     char tls_server_name[256];
     int insecure;
+    char server_pin[MQVPN_PIN_STR_LEN + 1]; /* "" = no pin */
 
     /* [Auth] — client */
     char auth_key[256];

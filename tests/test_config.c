@@ -2695,6 +2695,8 @@ test_json_bool_strict(void)
     ASSERT_EQ_INT(c.hybrid.enabled, 1, "hybrid enabled true");
 }
 
+#define PARITY_PIN "I7FvtHlDziB1xdZGyn_LS3mEDKTQoCGvgGp4_4HRzvM"
+
 static void
 test_ini_json_scalar_parity(void)
 {
@@ -2718,6 +2720,7 @@ test_ini_json_scalar_parity(void)
                       "Address = vpn.parity.test:4433\n"
                       "ServerName = sni.parity.test\n"
                       "Insecure = true\n"
+                      "Pin = " PARITY_PIN "\n"
                       "[TLS]\n"
                       "Cert = /tmp/parity.crt\n"
                       "Key = /tmp/parity.key\n"
@@ -2784,6 +2787,7 @@ test_ini_json_scalar_parity(void)
                        "\"server_addr\":\"vpn.parity.test:4433\","
                        "\"tls_server_name\":\"sni.parity.test\","
                        "\"insecure\":true,"
+                       "\"pin\":\"" PARITY_PIN "\","
                        "\"cert_file\":\"/tmp/parity.crt\","
                        "\"key_file\":\"/tmp/parity.key\","
                        "\"auth_key\":\"parity-secret\","
@@ -2856,6 +2860,8 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_INT(a.path_mtu, b.path_mtu, "parity path_mtu");
     ASSERT_EQ_INT(a.pmtud, b.pmtud, "parity pmtud");
     ASSERT_EQ_INT(a.max_clients, b.max_clients, "parity max_clients");
+    ASSERT_EQ_STR(a.server_pin, PARITY_PIN, "parity pin ini");
+    ASSERT_EQ_STR(b.server_pin, PARITY_PIN, "parity pin json");
     ASSERT_EQ_INT((int)a.init_max_path_id, (int)b.init_max_path_id,
                   "parity init_max_path_id");
     ASSERT_EQ_STR(a.reinjection, b.reinjection, "parity reinjection");
@@ -3185,6 +3191,52 @@ test_sched_cc_name_roundtrip(void)
     ASSERT_EQ_INT(mqvpn_reinj_from_name("dgram"), -1, "reinj from_name(dgram)");
 }
 
+static int
+pin_ini_rc(const char *val, mqvpn_file_config_t *c)
+{
+    char ini[1024];
+    snprintf(ini, sizeof(ini), "[Server]\nAddress = h:1\nPin = %s\n", val);
+    char *path = write_tmp(ini);
+    mqvpn_config_defaults(c);
+    int rc = mqvpn_config_load(c, path);
+    unlink(path);
+    return rc;
+}
+
+static void
+test_pin_malformed_is_fatal(void)
+{
+    mqvpn_file_config_t c;
+    char big[601];
+    memset(big, 'A', 600);
+    big[600] = '\0';
+
+    ASSERT_EQ_INT(pin_ini_rc("abc", &c), -1, "pin ini short");
+    ASSERT_EQ_INT(pin_ini_rc(big, &c), -1, "pin ini 600 chars");
+    ASSERT_EQ_INT(pin_ini_rc("I7FvtHlDziB1xdZGyn_LS3mEDKTQoCGvgGp4_4HRzv=", &c), -1,
+                  "pin ini bad char");
+    ASSERT_EQ_INT(pin_ini_rc("", &c), -1, "pin ini empty");
+    ASSERT_EQ_INT(pin_ini_rc(PARITY_PIN, &c), 0, "pin ini valid");
+    ASSERT_EQ_STR(c.server_pin, PARITY_PIN, "pin ini valid stored");
+
+    char json[800];
+    mqvpn_config_defaults(&c);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&c, "{\"pin\":\"abc\"}"), -1,
+                  "pin json short");
+    mqvpn_config_defaults(&c);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&c, "{\"pin\":123}"), -1,
+                  "pin json non-string");
+    snprintf(json, sizeof(json), "{\"pin\":\"%s\"}", big);
+    mqvpn_config_defaults(&c);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&c, json), -1, "pin json 600 chars");
+    snprintf(json, sizeof(json), "{\"pin\":\"%s\"}", PARITY_PIN);
+    mqvpn_config_defaults(&c);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&c, json), 0, "pin json valid");
+    ASSERT_EQ_STR(c.server_pin, PARITY_PIN, "pin json valid stored");
+    mqvpn_config_defaults(&c);
+    ASSERT_EQ_INT(c.server_pin[0], '\0', "pin default unset");
+}
+
 int
 main(void)
 {
@@ -3316,6 +3368,7 @@ main(void)
     test_redundant_ports_ini_json();
     test_redundant_ini_bool();
     test_json_bool_strict();
+    test_pin_malformed_is_fatal();
     test_ini_json_invalid_scalar_parity();
 
     /* JSON parser strictness */
